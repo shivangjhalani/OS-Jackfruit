@@ -420,30 +420,121 @@ int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host
  *   - accept control requests and update container state
  *   - reap children and respond to signals
  */
+
+void add_container(supervisor_ctx_t *ctx, container_record_t *rec)
+{
+    pthread_mutex_lock(&ctx->metadata_lock);
+
+    rec->next = ctx->containers;
+    ctx->containers = rec;
+
+    pthread_mutex_unlock(&ctx->metadata_lock);
+}
+
 static int run_supervisor(const char *rootfs)
 {
     supervisor_ctx_t ctx;
-    int rc;
-
     memset(&ctx, 0, sizeof(ctx));
-    ctx.server_fd = -1;
-    ctx.monitor_fd = -1;
 
-    rc = pthread_mutex_init(&ctx.metadata_lock, NULL);
-    if (rc != 0) {
-        errno = rc;
-        perror("pthread_mutex_init");
+    pthread_mutex_init(&ctx.metadata_lock, NULL);
+
+    /* ===================== CONTAINER 1 (alpha) ===================== */
+
+    int pipefd1[2];
+    pipe(pipefd1);
+
+    child_config_t cfg1;
+    memset(&cfg1, 0, sizeof(cfg1));
+
+    strcpy(cfg1.id, "alpha");
+    strcpy(cfg1.rootfs, "./rootfs-alpha");
+    strcpy(cfg1.command, "/bin/sh");
+    cfg1.nice_value = 0;
+    cfg1.log_write_fd = pipefd1[1];
+
+    char *stack1 = malloc(STACK_SIZE);
+
+    pid_t pid1 = clone(child_fn,
+                       stack1 + STACK_SIZE,
+                       CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
+                       &cfg1);
+
+    if (pid1 < 0) {
+        perror("clone alpha failed");
         return 1;
     }
 
-    rc = bounded_buffer_init(&ctx.log_buffer);
-    if (rc != 0) {
-        errno = rc;
-        perror("bounded_buffer_init");
-        pthread_mutex_destroy(&ctx.metadata_lock);
+    printf("Container alpha started with PID: %d\n", pid1);
+
+    container_record_t *rec1 = malloc(sizeof(container_record_t));
+    memset(rec1, 0, sizeof(*rec1));
+
+    strcpy(rec1->id, "alpha");
+    rec1->host_pid = pid1;
+    rec1->started_at = time(NULL);
+    rec1->state = CONTAINER_RUNNING;
+
+    add_container(&ctx, rec1);
+
+    /* ===================== CONTAINER 2 (beta) ===================== */
+
+    int pipefd2[2];
+    pipe(pipefd2);
+
+    child_config_t cfg2;
+    memset(&cfg2, 0, sizeof(cfg2));
+
+    strcpy(cfg2.id, "beta");
+    strcpy(cfg2.rootfs, "./rootfs-beta");
+    strcpy(cfg2.command, "/bin/sh");
+    cfg2.nice_value = 0;
+    cfg2.log_write_fd = pipefd2[1];
+
+    char *stack2 = malloc(STACK_SIZE);
+
+    pid_t pid2 = clone(child_fn,
+                       stack2 + STACK_SIZE,
+                       CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
+                       &cfg2);
+
+    if (pid2 < 0) {
+        perror("clone beta failed");
         return 1;
     }
 
+    printf("Container beta started with PID: %d\n", pid2);
+
+    container_record_t *rec2 = malloc(sizeof(container_record_t));
+    memset(rec2, 0, sizeof(*rec2));
+
+    strcpy(rec2->id, "beta");
+    rec2->host_pid = pid2;
+    rec2->started_at = time(NULL);
+    rec2->state = CONTAINER_RUNNING;
+
+    add_container(&ctx, rec2);
+
+    /* ===================== PRINT ALL ===================== */
+
+    printf("\n--- Container List ---\n");
+
+    container_record_t *curr = ctx.containers;
+    while (curr) {
+        printf("ID: %s | PID: %d | STATE: %s\n",
+               curr->id,
+               curr->host_pid,
+               state_to_string(curr->state));
+        curr = curr->next;
+    }
+
+    /* ===================== KEEP SUPERVISOR ALIVE ===================== */
+
+    while (1) {
+        sleep(10);
+    }
+
+    return 0;
+}
     /*
      * TODO:
      *   1) open /dev/container_monitor
@@ -453,41 +544,7 @@ static int run_supervisor(const char *rootfs)
      *   5) enter the supervisor event loop
      */
 
-   int pipefd[2];
-pipe(pipefd);
-
-child_config_t cfg;
-memset(&cfg, 0, sizeof(cfg));
-
-strcpy(cfg.id, "alpha");
-strcpy(cfg.rootfs, "./rootfs-alpha");
-strcpy(cfg.command, "/bin/sh");
-cfg.nice_value = 0;
-cfg.log_write_fd = pipefd[1];
-
-char *stack = malloc(STACK_SIZE);
-
-pid_t pid = clone(child_fn,
-                  stack + STACK_SIZE,
-                  CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
-                  &cfg);
-
-if (pid < 0) {
-    perror("clone failed");
-    return 1;
-}
-
-printf("Container started with PID: %d\n", pid);
-
-waitpid(pid, NULL, 0); 
-
-    bounded_buffer_begin_shutdown(&ctx.log_buffer);
-    bounded_buffer_destroy(&ctx.log_buffer);
-    pthread_mutex_destroy(&ctx.metadata_lock);
-    return 1;
-}
-
-/*
+   /*
  * TODO:
  * Implement the client-side control request path.
  *
