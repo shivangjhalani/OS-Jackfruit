@@ -128,6 +128,8 @@ typedef struct {
     container_record_t *containers;
 } supervisor_ctx_t;
 
+supervisor_ctx_t global_ctx;
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -338,7 +340,40 @@ void *logging_thread(void *arg)
  */
 int child_fn(void *arg)
 {
-    (void)arg;
+    child_config_t *cfg = (child_config_t *)arg;
+
+    // 1. Set hostname (UTS namespace)
+    sethostname(cfg->id, strlen(cfg->id));
+
+    // 2. Change root filesystem
+    if (chroot(cfg->rootfs) != 0) {
+        perror("chroot failed");
+        return 1;
+    }
+
+    if (chdir("/") != 0) {
+        perror("chdir failed");
+        return 1;
+    }
+
+    // 3. Mount /proc inside container
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        perror("mount /proc failed");
+        return 1;
+    }
+
+    // 4. Redirect stdout & stderr to pipe
+    //dup2(cfg->log_write_fd, STDOUT_FILENO);
+    //dup2(cfg->log_write_fd, STDERR_FILENO);
+
+    // 5. Set nice value (priority)
+    if (cfg->nice_value != 0)
+        nice(cfg->nice_value);
+
+    // 6. Execute comman
+         execlp(cfg->command, cfg->command, "30", NULL);
+
+    perror("exec failed");
     return 1;
 }
 
@@ -387,29 +422,17 @@ int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host
  *   - accept control requests and update container state
  *   - reap children and respond to signals
  */
-static int run_supervisor(const char *rootfs)
+
+void add_container(supervisor_ctx_t *ctx, container_record_t *rec)
 {
-    supervisor_ctx_t ctx;
-    int rc;
+    pthread_mutex_lock(&ctx->metadata_lock);
 
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.server_fd = -1;
-    ctx.monitor_fd = -1;
+    rec->next = ctx->containers;
+    ctx->containers = rec;
 
-    rc = pthread_mutex_init(&ctx.metadata_lock, NULL);
-    if (rc != 0) {
-        errno = rc;
-        perror("pthread_mutex_init");
-        return 1;
-    }
+    pthread_mutex_unlock(&ctx->metadata_lock);
+}
 
-    rc = bounded_buffer_init(&ctx.log_buffer);
-    if (rc != 0) {
-        errno = rc;
-        perror("bounded_buffer_init");
-        pthread_mutex_destroy(&ctx.metadata_lock);
-        return 1;
-    }
 
     /*
      * TODO:
@@ -419,15 +442,172 @@ static int run_supervisor(const char *rootfs)
      *   4) spawn the logger thread
      *   5) enter the supervisor event loop
      */
-    fprintf(stderr, "Supervisor mode not implemented yet for base-rootfs: %s\n", rootfs);
 
-    bounded_buffer_begin_shutdown(&ctx.log_buffer);
-    bounded_buffer_destroy(&ctx.log_buffer);
-    pthread_mutex_destroy(&ctx.metadata_lock);
-    return 1;
+/* 🔴 ADD THIS ABOVE run_supervisor() */
+void handle_sigchld(int sig)
+{
+    (void)sig;
+
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        printf("Child exited: PID = %d\n", pid);
+    }
 }
 
-/*
+void stop_container(const char *id)
+{
+    pthread_mutex_lock(&global_ctx.metadata_lock);
+
+    container_record_t *curr = global_ctx.containers;
+
+    while (curr) {
+        if (strcmp(curr->id, id) == 0) {
+
+            if (curr->state == CONTAINER_RUNNING) {
+                kill(curr->host_pid, SIGTERM);
+                printf("Stopped container: %s\n", id);
+            } else {
+                printf("Container not running: %s\n", id);
+            }
+
+            pthread_mutex_unlock(&global_ctx.metadata_lock);
+            return;
+        }
+        curr = curr->next;
+    }
+
+    pthread_mutex_unlock(&global_ctx.metadata_lock);
+    printf("Container not found: %s\n", id);
+}
+
+static int run_supervisor(const char *rootfs)
+{
+    memset(&global_ctx, 0, sizeof(global_ctx));
+    pthread_mutex_init(&global_ctx.metadata_lock, NULL);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_sigchld;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
+
+    int pipefd1[2];
+    pipe(pipefd1);
+
+    child_config_t cfg1;
+    memset(&cfg1, 0, sizeof(cfg1));
+
+    strcpy(cfg1.id, "alpha");
+    strcpy(cfg1.rootfs, "./rootfs-alpha");
+    strcpy(cfg1.command, "/bin/sleep");
+    cfg1.nice_value = 0;
+    cfg1.log_write_fd = pipefd1[1];
+
+    char *stack1 = malloc(STACK_SIZE);
+
+    pid_t pid1 = clone(child_fn,
+                       stack1 + STACK_SIZE,
+                       CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
+                       &cfg1);
+
+    if (pid1 < 0) {
+        perror("clone alpha failed");
+        return 1;
+    }
+
+    printf("Container alpha started with PID: %d\n", pid1);
+
+    container_record_t *rec1 = malloc(sizeof(container_record_t));
+    memset(rec1, 0, sizeof(*rec1));
+
+    strcpy(rec1->id, "alpha");
+    rec1->host_pid = pid1;
+    rec1->started_at = time(NULL);
+    rec1->state = CONTAINER_RUNNING;
+
+    add_container(&global_ctx, rec1);
+
+    int pipefd2[2];
+    pipe(pipefd2);
+
+    child_config_t cfg2;
+    memset(&cfg2, 0, sizeof(cfg2));
+
+    strcpy(cfg2.id, "beta");
+    strcpy(cfg2.rootfs, "./rootfs-beta");
+    strcpy(cfg2.command, "/bin/sleep");
+    cfg2.nice_value = 0;
+    cfg2.log_write_fd = pipefd2[1];
+
+    char *stack2 = malloc(STACK_SIZE);
+
+    pid_t pid2 = clone(child_fn,
+                       stack2 + STACK_SIZE,
+                       CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
+                       &cfg2);
+
+    if (pid2 < 0) {
+        perror("clone beta failed");
+        return 1;
+    }
+
+    printf("Container beta started with PID: %d\n", pid2);
+
+    container_record_t *rec2 = malloc(sizeof(container_record_t));
+    memset(rec2, 0, sizeof(*rec2));
+
+    strcpy(rec2->id, "beta");
+    rec2->host_pid = pid2;
+    rec2->started_at = time(NULL);
+    rec2->state = CONTAINER_RUNNING;
+
+    add_container(&global_ctx, rec2);
+
+    printf("\n--- Container List ---\n");
+
+    container_record_t *curr = global_ctx.containers;
+    while (curr) {
+        printf("ID: %s | PID: %d | STATE: %s\n",
+               curr->id,
+               curr->host_pid,
+               state_to_string(curr->state));
+        curr = curr->next;
+    }
+
+    char cmd[32];
+
+while (1) {
+    printf("\nEnter command (stop alpha / stop beta / ps): ");
+    fflush(stdout);
+
+    if (fgets(cmd, sizeof(cmd), stdin) == NULL)
+        continue;
+
+    if (strncmp(cmd, "stop alpha", 10) == 0) {
+        stop_container("alpha");
+    }
+    else if (strncmp(cmd, "stop beta", 9) == 0) {
+        stop_container("beta");
+    }
+    else if (strncmp(cmd, "ps", 2) == 0) {
+        container_record_t *c = global_ctx.containers;
+        printf("\n--- Container List ---\n");
+        while (c) {
+            printf("ID: %s | PID: %d | STATE: %s\n",
+                   c->id,
+                   c->host_pid,
+                   state_to_string(c->state));
+            c = c->next;
+        }
+    }
+}
+
+    return 0;
+}
+
+   /*
  * TODO:
  * Implement the client-side control request path.
  *
