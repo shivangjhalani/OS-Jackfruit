@@ -338,7 +338,40 @@ void *logging_thread(void *arg)
  */
 int child_fn(void *arg)
 {
-    (void)arg;
+    child_config_t *cfg = (child_config_t *)arg;
+
+    // 1. Set hostname (UTS namespace)
+    sethostname(cfg->id, strlen(cfg->id));
+
+    // 2. Change root filesystem
+    if (chroot(cfg->rootfs) != 0) {
+        perror("chroot failed");
+        return 1;
+    }
+
+    if (chdir("/") != 0) {
+        perror("chdir failed");
+        return 1;
+    }
+
+    // 3. Mount /proc inside container
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        perror("mount /proc failed");
+        return 1;
+    }
+
+    // 4. Redirect stdout & stderr to pipe
+    //dup2(cfg->log_write_fd, STDOUT_FILENO);
+    //dup2(cfg->log_write_fd, STDERR_FILENO);
+
+    // 5. Set nice value (priority)
+    if (cfg->nice_value != 0)
+        nice(cfg->nice_value);
+
+    // 6. Execute command
+    execlp(cfg->command, cfg->command, NULL);
+
+    perror("exec failed");
     return 1;
 }
 
@@ -419,7 +452,34 @@ static int run_supervisor(const char *rootfs)
      *   4) spawn the logger thread
      *   5) enter the supervisor event loop
      */
-    fprintf(stderr, "Supervisor mode not implemented yet for base-rootfs: %s\n", rootfs);
+
+   int pipefd[2];
+pipe(pipefd);
+
+child_config_t cfg;
+memset(&cfg, 0, sizeof(cfg));
+
+strcpy(cfg.id, "alpha");
+strcpy(cfg.rootfs, "./rootfs-alpha");
+strcpy(cfg.command, "/bin/sh");
+cfg.nice_value = 0;
+cfg.log_write_fd = pipefd[1];
+
+char *stack = malloc(STACK_SIZE);
+
+pid_t pid = clone(child_fn,
+                  stack + STACK_SIZE,
+                  CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD,
+                  &cfg);
+
+if (pid < 0) {
+    perror("clone failed");
+    return 1;
+}
+
+printf("Container started with PID: %d\n", pid);
+
+waitpid(pid, NULL, 0); 
 
     bounded_buffer_begin_shutdown(&ctx.log_buffer);
     bounded_buffer_destroy(&ctx.log_buffer);

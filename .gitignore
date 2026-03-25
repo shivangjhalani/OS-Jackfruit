@@ -1,1 +1,5 @@
-solved
+boilerplate/rootfs-*/proc/
+boilerplate/rootfs-*/sys/
+boilerplate/rootfs-*/dev/
+boilerplate/rootfs-*/tmp/
+boilerplate/rootfs-*/root/
