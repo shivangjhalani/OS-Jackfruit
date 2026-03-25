@@ -1,5 +1,16 @@
-boilerplate/rootfs-*/proc/
-boilerplate/rootfs-*/sys/
-boilerplate/rootfs-*/dev/
-boilerplate/rootfs-*/tmp/
-boilerplate/rootfs-*/root/
+# Ignore all root filesystems
+boilerplate/rootfs-*
+
+# Ignore downloaded archives
+*.tar.gz
+
+# Ignore binaries
+engine
+cpu_hog
+io_pulse
+memory_hog
+
+# Ignore build files
+*.o
+*.ko
+*.d
