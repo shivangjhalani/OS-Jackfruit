@@ -128,6 +128,8 @@ typedef struct {
     container_record_t *containers;
 } supervisor_ctx_t;
 
+supervisor_ctx_t global_ctx;
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -368,8 +370,8 @@ int child_fn(void *arg)
     if (cfg->nice_value != 0)
         nice(cfg->nice_value);
 
-    // 6. Execute command
-    execlp(cfg->command, cfg->command, NULL);
+    // 6. Execute comman
+         execlp(cfg->command, cfg->command, "30", NULL);
 
     perror("exec failed");
     return 1;
@@ -431,14 +433,65 @@ void add_container(supervisor_ctx_t *ctx, container_record_t *rec)
     pthread_mutex_unlock(&ctx->metadata_lock);
 }
 
+
+    /*
+     * TODO:
+     *   1) open /dev/container_monitor
+     *   2) create the control socket / FIFO / shared-memory channel
+     *   3) install SIGCHLD / SIGINT / SIGTERM handling
+     *   4) spawn the logger thread
+     *   5) enter the supervisor event loop
+     */
+
+/* 🔴 ADD THIS ABOVE run_supervisor() */
+void handle_sigchld(int sig)
+{
+    (void)sig;
+
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        printf("Child exited: PID = %d\n", pid);
+    }
+}
+
+void stop_container(const char *id)
+{
+    pthread_mutex_lock(&global_ctx.metadata_lock);
+
+    container_record_t *curr = global_ctx.containers;
+
+    while (curr) {
+        if (strcmp(curr->id, id) == 0) {
+
+            if (curr->state == CONTAINER_RUNNING) {
+                kill(curr->host_pid, SIGTERM);
+                printf("Stopped container: %s\n", id);
+            } else {
+                printf("Container not running: %s\n", id);
+            }
+
+            pthread_mutex_unlock(&global_ctx.metadata_lock);
+            return;
+        }
+        curr = curr->next;
+    }
+
+    pthread_mutex_unlock(&global_ctx.metadata_lock);
+    printf("Container not found: %s\n", id);
+}
+
 static int run_supervisor(const char *rootfs)
 {
-    supervisor_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
+    memset(&global_ctx, 0, sizeof(global_ctx));
+    pthread_mutex_init(&global_ctx.metadata_lock, NULL);
 
-    pthread_mutex_init(&ctx.metadata_lock, NULL);
-
-    /* ===================== CONTAINER 1 (alpha) ===================== */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_sigchld;
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 
     int pipefd1[2];
     pipe(pipefd1);
@@ -448,7 +501,7 @@ static int run_supervisor(const char *rootfs)
 
     strcpy(cfg1.id, "alpha");
     strcpy(cfg1.rootfs, "./rootfs-alpha");
-    strcpy(cfg1.command, "/bin/sh");
+    strcpy(cfg1.command, "/bin/sleep");
     cfg1.nice_value = 0;
     cfg1.log_write_fd = pipefd1[1];
 
@@ -474,9 +527,7 @@ static int run_supervisor(const char *rootfs)
     rec1->started_at = time(NULL);
     rec1->state = CONTAINER_RUNNING;
 
-    add_container(&ctx, rec1);
-
-    /* ===================== CONTAINER 2 (beta) ===================== */
+    add_container(&global_ctx, rec1);
 
     int pipefd2[2];
     pipe(pipefd2);
@@ -486,7 +537,7 @@ static int run_supervisor(const char *rootfs)
 
     strcpy(cfg2.id, "beta");
     strcpy(cfg2.rootfs, "./rootfs-beta");
-    strcpy(cfg2.command, "/bin/sh");
+    strcpy(cfg2.command, "/bin/sleep");
     cfg2.nice_value = 0;
     cfg2.log_write_fd = pipefd2[1];
 
@@ -512,13 +563,11 @@ static int run_supervisor(const char *rootfs)
     rec2->started_at = time(NULL);
     rec2->state = CONTAINER_RUNNING;
 
-    add_container(&ctx, rec2);
-
-    /* ===================== PRINT ALL ===================== */
+    add_container(&global_ctx, rec2);
 
     printf("\n--- Container List ---\n");
 
-    container_record_t *curr = ctx.containers;
+    container_record_t *curr = global_ctx.containers;
     while (curr) {
         printf("ID: %s | PID: %d | STATE: %s\n",
                curr->id,
@@ -527,22 +576,36 @@ static int run_supervisor(const char *rootfs)
         curr = curr->next;
     }
 
-    /* ===================== KEEP SUPERVISOR ALIVE ===================== */
+    char cmd[32];
 
-    while (1) {
-        sleep(10);
+while (1) {
+    printf("\nEnter command (stop alpha / stop beta / ps): ");
+    fflush(stdout);
+
+    if (fgets(cmd, sizeof(cmd), stdin) == NULL)
+        continue;
+
+    if (strncmp(cmd, "stop alpha", 10) == 0) {
+        stop_container("alpha");
     }
+    else if (strncmp(cmd, "stop beta", 9) == 0) {
+        stop_container("beta");
+    }
+    else if (strncmp(cmd, "ps", 2) == 0) {
+        container_record_t *c = global_ctx.containers;
+        printf("\n--- Container List ---\n");
+        while (c) {
+            printf("ID: %s | PID: %d | STATE: %s\n",
+                   c->id,
+                   c->host_pid,
+                   state_to_string(c->state));
+            c = c->next;
+        }
+    }
+}
 
     return 0;
 }
-    /*
-     * TODO:
-     *   1) open /dev/container_monitor
-     *   2) create the control socket / FIFO / shared-memory channel
-     *   3) install SIGCHLD / SIGINT / SIGTERM handling
-     *   4) spawn the logger thread
-     *   5) enter the supervisor event loop
-     */
 
    /*
  * TODO:
