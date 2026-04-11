@@ -34,7 +34,7 @@ static unsigned int parse_uint(const char *arg, unsigned int fallback)
 
 int main(int argc, char *argv[])
 {
-    const unsigned int iterations = (argc > 1) ? parse_uint(argv[1], 20) : 20;
+    const unsigned int iterations = 40;
     const unsigned int sleep_ms = (argc > 2) ? parse_uint(argv[2], 200) : 200;
     int fd;
     unsigned int i;
