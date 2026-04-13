@@ -5,7 +5,7 @@
 | Name | SRN |
 |------|-----|
 | Mahathi S | PES2UG24AM084 |
-| Lekha N | PES2UG24AM082 |
+| Leka N | PES2UG24AM082 |
 
 ---
 
