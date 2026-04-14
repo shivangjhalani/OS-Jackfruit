@@ -79,26 +79,73 @@ sudo rmmod monitor
 
 ## 3. Demo (Screenshots)
 
-Screenshot 1 — Multi-container supervision
-<img width="598" height="123" alt="image" src="https://github.com/user-attachments/assets/080a1866-8229-4886-8d19-fd4c73bf3940" />
-<img width="595" height="165" alt="image" src="https://github.com/user-attachments/assets/f366e003-c6b6-4774-a21b-86ab4f85bb5d" />
-Screenshot 2 — Metadata tracking
-<img width="735" height="108" alt="image" src="https://github.com/user-attachments/assets/06223658-d8c6-4c32-9fe5-3133cd81084a" />
-Screenshot 3 — Bounded-buffer logging
-<img width="738" height="175" alt="image" src="https://github.com/user-attachments/assets/ad5e462e-4b59-4880-b532-94dbf3d75aa9" />
-Screenshot 4 — CLI and IPC
-<img width="739" height="93" alt="image" src="https://github.com/user-attachments/assets/6cb7d78b-7e2b-4e87-baa1-8d96697e8824" />
-Screenshot 5 — Soft-limit warning
-<img width="733" height="420" alt="image" src="https://github.com/user-attachments/assets/849be352-f526-40e2-ad3e-c42ef547ea5d" />
-Screenshot 6 — Hard-limit enforcement
-<img width="737" height="340" alt="image" src="https://github.com/user-attachments/assets/2e945263-bbef-4089-b36c-a1ad9cdc6276" />
-Screenshot 7 — Scheduling experiment
-<img width="740" height="202" alt="image" src="https://github.com/user-attachments/assets/ae6a9ef1-0379-41df-94e8-e3831ad8cd25" />
-<img width="742" height="193" alt="image" src="https://github.com/user-attachments/assets/1ef68305-c900-4b32-b45a-88971daa142b" />
-<img width="740" height="196" alt="image" src="https://github.com/user-attachments/assets/aaa66131-6b32-4c84-b587-18762025a695" />
-Screenshot 8 — Clean teardown
-<img width="731" height="189" alt="image" src="https://github.com/user-attachments/assets/562bfe6f-5c87-4f87-9977-02e53e52d227" />
+### Screenshot 1 — Multi-container supervision
 
+<img src="https://github.com/user-attachments/assets/080a1866-8229-4886-8d19-fd4c73bf3940" width="600"/>
+
+<img src="https://github.com/user-attachments/assets/f366e003-c6b6-4774-a21b-86ab4f85bb5d" width="600"/>
+
+**Caption:** Two containers running simultaneously under a single supervisor process.
+
+---
+
+### Screenshot 2 — Metadata tracking
+
+<img src="https://github.com/user-attachments/assets/06223658-d8c6-4c32-9fe5-3133cd81084a" width="700"/>
+
+**Caption:** Output of the `ps` command showing container metadata such as PID, state, and limits.
+
+---
+
+### Screenshot 3 — Bounded-buffer logging
+
+<img src="https://github.com/user-attachments/assets/ad5e462e-4b59-4880-b532-94dbf3d75aa9" width="700"/>
+
+**Caption:** Container output captured through the logging pipeline and stored in log files.
+
+---
+
+### Screenshot 4 — CLI and IPC
+
+<img src="https://github.com/user-attachments/assets/6cb7d78b-7e2b-4e87-baa1-8d96697e8824" width="700"/>
+
+**Caption:** CLI communicates with the supervisor via UNIX domain socket and receives responses.
+
+---
+
+### Screenshot 5 — Soft-limit warning
+
+<img src="https://github.com/user-attachments/assets/849be352-f526-40e2-ad3e-c42ef547ea5d" width="700"/>
+
+**Caption:** Kernel module logs a warning when container memory usage exceeds the soft limit.
+
+---
+
+### Screenshot 6 — Hard-limit enforcement
+
+<img src="https://github.com/user-attachments/assets/2e945263-bbef-4089-b36c-a1ad9cdc6276" width="700"/>
+
+**Caption:** Container is terminated when memory usage exceeds the hard limit.
+
+---
+
+### Screenshot 7 — Scheduling experiment
+
+<img src="https://github.com/user-attachments/assets/ae6a9ef1-0379-41df-94e8-e3831ad8cd25" width="700"/>
+
+<img src="https://github.com/user-attachments/assets/1ef68305-c900-4b32-b45a-88971daa142b" width="700"/>
+
+<img src="https://github.com/user-attachments/assets/aaa66131-6b32-4c84-b587-18762025a695" width="700"/>
+
+**Caption:** Comparison of CPU scheduling behavior under different nice values.
+
+---
+
+### Screenshot 8 — Clean teardown
+
+<img src="https://github.com/user-attachments/assets/562bfe6f-5c87-4f87-9977-02e53e52d227" width="700"/>
+
+**Caption:** All containers are properly terminated with no zombie processes remaining.
 
 ---
 
