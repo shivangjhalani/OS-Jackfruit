@@ -32,3 +32,6 @@ logs/
 *.swp
 *~
 .vscode/
+
+# Local backups
+boilerplate/engine.c.bak
