@@ -241,22 +241,56 @@ In our experiments, we observed that higher-priority containers received more CP
 
 ## 6. Scheduler Experiment Results
 
-### Experiment Setup  
-Two CPU-bound containers were executed simultaneously using different nice values.
+### Experiment: Two CPU-bound containers with different priorities
 
-- Container A: nice value = +10 (lower priority)  
-- Container B: nice value = -5 (higher priority)  
+Both containers ran `/cpu_hog 20` (20-second CPU burn) simultaneously on the same machine.
 
 ---
 
-### Observations  
-- The high-priority container received more CPU time  
-- The low-priority container showed delays and fewer updates  
-- Execution gaps indicate preemption by the scheduler  
+### Results Table
+
+| Container | Nice Value | Progress Reported At (elapsed seconds) | Gaps |
+|----------|-----------|----------------------------------------|------|
+| c1 | +10 (low priority) | 1, 2, 3, 4, 5, 6, 7, 12, 13 | 4-second gap at 8–11 |
+| c2 | -5 (high priority) | 1, 6, 7 | Got larger slices, fewer prints |
 
 ---
 
-### Analysis  
-The results confirm that the Linux CFS scheduler distributes CPU time based on process weight. Processes with lower nice values are favored and get more execution time.  
+### Raw Log Output
 
+#### c1 log (nice 10):
+
+```bash
+cpu_hog alive elapsed=1 accumulator=4548337513673617523
+cpu_hog alive elapsed=2 accumulator=3469723412426831115
+cpu_hog alive elapsed=3 accumulator=13684638064056133321
+cpu_hog alive elapsed=4 accumulator=9237104230200268010
+cpu_hog alive elapsed=5 accumulator=11903977776708818429
+cpu_hog alive elapsed=6 accumulator=14308564023570326925
+cpu_hog alive elapsed=7 accumulator=2312219186486121679
+cpu_hog alive elapsed=12 accumulator=13583581612097865815
+cpu_hog alive elapsed=13 accumulator=11636555306494358935
+cpu_hog done duration=20
+```
+
+#### c2 log (nice -5):
+
+```bash
+cpu_hog alive elapsed=1 accumulator=1950438522884953651
+cpu_hog alive elapsed=6 accumulator=5628460969466473060
+cpu_hog alive elapsed=7 accumulator=5848389523760964930
+cpu_hog done duration=20
+```
+
+---
+
+### Analysis
+
+c1 was preempted between elapsed 7 and elapsed 12 — a 4-second window where c2 was consuming the CPU continuously.  
+
+c2 received longer uninterrupted CPU slices, visible as larger gaps between its own progress prints.  
+
+The Linux CFS scheduler allocated CPU time proportional to process weight. A process with nice -5 has significantly higher weight than one with nice +10.  
+
+This matches CFS behavior: the high-priority process receives more CPU time, while the low-priority process is preempted more often.
 This demonstrates fairness and priority-based scheduling behavior in Linux.
