@@ -128,6 +128,12 @@ typedef struct {
     container_record_t *containers;
 } supervisor_ctx_t;
 
+typedef struct {
+    int read_fd;
+    char container_id[CONTAINER_ID_LEN];
+    bounded_buffer_t *buffer;
+} forwarder_args_t;
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -375,6 +381,109 @@ void *logging_thread(void *arg)
     return NULL;
 }
 
+void *log_forwarder(void *arg)
+{
+    forwarder_args_t *args = (forwarder_args_t *)arg;
+    char chunk[LOG_CHUNK_SIZE];
+    ssize_t n;
+
+    // Read until the pipe is closed (when the child process exits)
+    while ((n = read(args->read_fd, chunk, sizeof(chunk))) > 0) {
+        log_item_t item;
+        memset(&item, 0, sizeof(item));
+        
+        strncpy(item.container_id, args->container_id, CONTAINER_ID_LEN - 1);
+        item.length = (size_t)n;
+        memcpy(item.data, chunk, n);
+
+        // Push to the bounded buffer for the logging_thread to pick up
+        if (bounded_buffer_push(args->buffer, &item) != 0) {
+            break; // Shutdown or error
+        }
+    }
+
+    close(args->read_fd);
+    free(args);
+    return NULL;
+}
+
+void handle_start_request(supervisor_ctx_t *ctx, control_request_t *req, control_response_t *resp)
+{
+    int pipe_fds[2];
+    if (pipe(pipe_fds) < 0) {
+        resp->status = -1;
+        strncpy(resp->message, "Failed to create log pipe", CONTROL_MESSAGE_LEN);
+        return;
+    }
+
+    // Prepare child configuration
+    child_config_t *config = malloc(sizeof(child_config_t));
+    strncpy(config->id, req->container_id, CONTAINER_ID_LEN - 1);
+    strncpy(config->rootfs, req->rootfs, PATH_MAX - 1);
+    strncpy(config->command, req->command, CHILD_COMMAND_LEN - 1);
+    config->nice_value = req->nice_value;
+    config->log_write_fd = pipe_fds[1];
+
+    // Allocate stack for clone
+    char *stack = malloc(STACK_SIZE);
+    if (!stack) {
+        resp->status = -1;
+        return;
+    }
+
+    // Perform clone with namespace flags
+    // SIGCHLD is required so we can reap the child via waitpid
+    pid_t child_pid = clone(child_fn, stack + STACK_SIZE, 
+                            CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD, 
+                            config);
+
+    if (child_pid < 0) {
+        perror("clone failed");
+        resp->status = -1;
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        free(stack);
+        free(config);
+        return;
+    }
+
+    // Supervisor-side cleanup
+    close(pipe_fds[1]); // Close write end in supervisor
+
+    // 1. Update Metadata List
+    pthread_mutex_lock(&ctx->metadata_lock);
+    container_record_t *new_rec = malloc(sizeof(container_record_t));
+    memset(new_rec, 0, sizeof(container_record_t));
+    
+    strncpy(new_rec->id, req->container_id, CONTAINER_ID_LEN - 1);
+    new_rec->host_pid = child_pid;
+    new_rec->started_at = time(NULL);
+    new_rec->state = CONTAINER_RUNNING;
+    snprintf(new_rec->log_path, PATH_MAX, "%s/%s.log", LOG_DIR, req->container_id);
+    
+    new_rec->next = ctx->containers;
+    ctx->containers = new_rec;
+    pthread_mutex_unlock(&ctx->metadata_lock);
+
+    // 2. Register with Kernel Monitor
+    if (register_with_monitor(ctx->monitor_fd, req->container_id, child_pid, 
+                              req->soft_limit_bytes, req->hard_limit_bytes) < 0) {
+        fprintf(stderr, "Warning: Failed to register %s with kernel monitor\n", req->container_id);
+    }
+
+    // 3. Launch Log Forwarder Thread
+    forwarder_args_t *f_args = malloc(sizeof(forwarder_args_t));
+    f_args->read_fd = pipe_fds[0];
+    strncpy(f_args->container_id, req->container_id, CONTAINER_ID_LEN - 1);
+    f_args->buffer = &ctx->log_buffer;
+
+    pthread_t f_thread;
+    pthread_create(&f_thread, NULL, log_forwarder, f_args);
+    pthread_detach(f_thread); // We don't need to join this; it dies when the pipe closes
+
+    snprintf(resp->message, CONTROL_MESSAGE_LEN, "Container %s started (PID %d)", req->container_id, child_pid);
+    resp->status = 0;
+}
 /*
  * TODO:
  * Implement the clone child entrypoint.
@@ -584,32 +693,6 @@ static int run_supervisor(const char *rootfs)
  * logging pipe. A UNIX domain socket is the most direct option, but a
  * FIFO or shared memory design is also acceptable if justified.
  */
-static int send_control_request(const control_request_t *req)
-{
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) return 1;
-
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("Connect failed (is supervisor running?)");
-        close(fd);
-        return 1;
-    }
-
-    write(fd, req, sizeof(control_request_t));
-    
-    control_response_t resp;
-    if (read(fd, &resp, sizeof(resp)) > 0) {
-        printf("%s\n", resp.message);
-    }
-
-    close(fd);
-    return resp.status;
-}
 
 static int send_control_request(const control_request_t *req)
 {
