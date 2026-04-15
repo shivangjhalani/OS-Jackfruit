@@ -407,6 +407,72 @@ void *log_forwarder(void *arg)
     return NULL;
 }
 
+
+/*
+ * TODO:
+ * Implement the clone child entrypoint.
+ *
+ * Required outcomes:
+ *   - isolated PID / UTS / mount context
+ *   - chroot or pivot_root into rootfs
+ *   - working /proc inside container
+ *   - stdout / stderr redirected to the supervisor logging path
+ *   - configured command executed inside the container
+ */
+int child_fn(void *arg)
+{
+    child_config_t *config = (child_config_t*) arg;
+    dup2(config->log_write_fd, STDOUT_FILENO);
+    dup2(config->log_write_fd, STDERR_FILENO);
+    close(config->log_write_fd);
+
+    sethostname(config->id, strlen(config->id));
+
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)<0) exit(1);
+
+    if (chroot(config->rootfs) < 0 || chdir("/") < 0) {
+        perror("chroot failed");
+        exit(1);
+    }
+    mount("proc", "/proc", "proc", 0, NULL);
+
+    return 1;
+}
+
+int register_with_monitor(int monitor_fd,
+                          const char *container_id,
+                          pid_t host_pid,
+                          unsigned long soft_limit_bytes,
+                          unsigned long hard_limit_bytes)
+{
+    struct monitor_request req;
+
+    memset(&req, 0, sizeof(req));
+    req.pid = host_pid;
+    req.soft_limit_bytes = soft_limit_bytes;
+    req.hard_limit_bytes = hard_limit_bytes;
+    strncpy(req.container_id, container_id, sizeof(req.container_id) - 1);
+
+    if (ioctl(monitor_fd, MONITOR_REGISTER, &req) < 0)
+        return -1;
+
+    return 0;
+}
+
+int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host_pid)
+{
+    struct monitor_request req;
+
+    memset(&req, 0, sizeof(req));
+    req.pid = host_pid;
+    strncpy(req.container_id, container_id, sizeof(req.container_id) - 1);
+
+    if (ioctl(monitor_fd, MONITOR_UNREGISTER, &req) < 0)
+        return -1;
+
+    return 0;
+}
+
 void handle_start_request(supervisor_ctx_t *ctx, control_request_t *req, control_response_t *resp)
 {
     int pipe_fds[2];
@@ -484,71 +550,6 @@ void handle_start_request(supervisor_ctx_t *ctx, control_request_t *req, control
     snprintf(resp->message, CONTROL_MESSAGE_LEN, "Container %s started (PID %d)", req->container_id, child_pid);
     resp->status = 0;
 }
-/*
- * TODO:
- * Implement the clone child entrypoint.
- *
- * Required outcomes:
- *   - isolated PID / UTS / mount context
- *   - chroot or pivot_root into rootfs
- *   - working /proc inside container
- *   - stdout / stderr redirected to the supervisor logging path
- *   - configured command executed inside the container
- */
-int child_fn(void *arg)
-{
-    child_config_t *config = (child_config_t*) arg;
-    dup2(config->log_write_fd, STDOUT_FILENO);
-    dup2(config->log_write_fd, STDERR_FILENO);
-    close(config->log_write_fd);
-
-    sethostname(config->id, strlen(config->id));
-
-    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)<0) exit(1);
-
-    if (chroot(config->rootfs) < 0 || chdir("/") < 0) {
-        perror("chroot failed");
-        exit(1);
-    }
-    mount("proc", "/proc", "proc", 0, NULL);
-
-    return 1;
-}
-
-int register_with_monitor(int monitor_fd,
-                          const char *container_id,
-                          pid_t host_pid,
-                          unsigned long soft_limit_bytes,
-                          unsigned long hard_limit_bytes)
-{
-    struct monitor_request req;
-
-    memset(&req, 0, sizeof(req));
-    req.pid = host_pid;
-    req.soft_limit_bytes = soft_limit_bytes;
-    req.hard_limit_bytes = hard_limit_bytes;
-    strncpy(req.container_id, container_id, sizeof(req.container_id) - 1);
-
-    if (ioctl(monitor_fd, MONITOR_REGISTER, &req) < 0)
-        return -1;
-
-    return 0;
-}
-
-int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host_pid)
-{
-    struct monitor_request req;
-
-    memset(&req, 0, sizeof(req));
-    req.pid = host_pid;
-    strncpy(req.container_id, container_id, sizeof(req.container_id) - 1);
-
-    if (ioctl(monitor_fd, MONITOR_UNREGISTER, &req) < 0)
-        return -1;
-
-    return 0;
-}
-
 /*
  * TODO:
  * Implement the long-running supervisor process.
