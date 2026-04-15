@@ -436,6 +436,13 @@ int child_fn(void *arg)
     }
     mount("proc", "/proc", "proc", 0, NULL);
 
+    char *argv[] = { "/bin/sh", "-c", config->command, NULL };
+    execvp(argv[0], argv);
+
+    
+    perror("exec failed");
+    exit(1);
+
     return 1;
 }
 
