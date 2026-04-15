@@ -365,7 +365,7 @@ void *logging_thread(void *arg)
 
         if(target_path != NULL) {
             int fd = open(target_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
-            if(fd != -1) { // Fixed: corrected FD check
+            if(fd != -1) { 
                 write(fd, item.data, item.length);
                 close(fd);
             }
@@ -602,6 +602,36 @@ static int send_control_request(const control_request_t *req)
 
     write(fd, req, sizeof(control_request_t));
     
+    control_response_t resp;
+    if (read(fd, &resp, sizeof(resp)) > 0) {
+        printf("%s\n", resp.message);
+    }
+
+    close(fd);
+    return resp.status;
+}
+
+static int send_control_request(const control_request_t *req)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return 1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("Supervisor connection failed");
+        close(fd);
+        return 1;
+    }
+
+    if (write(fd, req, sizeof(control_request_t)) != sizeof(control_request_t)) {
+        close(fd);
+        return 1;
+    }
+
     control_response_t resp;
     if (read(fd, &resp, sizeof(resp)) > 0) {
         printf("%s\n", resp.message);
