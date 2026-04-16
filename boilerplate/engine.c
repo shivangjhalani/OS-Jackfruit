@@ -44,7 +44,7 @@
 #define CONTROL_MESSAGE_LEN 256
 #define CHILD_COMMAND_LEN 256
 #define LOG_CHUNK_SIZE 4096
-#define LOG_BUFFER_CAPACITY 16
+#define LOG_BUFFER_CAPACITY 128
 #define DEFAULT_SOFT_LIMIT (40UL << 20)
 #define DEFAULT_HARD_LIMIT (64UL << 20)
 
@@ -422,28 +422,53 @@ void *log_forwarder(void *arg)
 int child_fn(void *arg)
 {
     child_config_t *config = (child_config_t*) arg;
+    
     dup2(config->log_write_fd, STDOUT_FILENO);
     dup2(config->log_write_fd, STDERR_FILENO);
     close(config->log_write_fd);
-
+    
+    fprintf(stderr, "DEBUG: Container %s starting\n", config->id);
+    fprintf(stderr, "DEBUG: Command: %s\n", config->command);
+    
     sethostname(config->id, strlen(config->id));
-
-    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)<0) exit(1);
-
-    if (chroot(config->rootfs) < 0 || chdir("/") < 0) {
+    
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) < 0) {
+        perror("mount private failed");
+        exit(1);
+    }
+    
+    if (chroot(config->rootfs) < 0) {
         perror("chroot failed");
         exit(1);
     }
-    mount("proc", "/proc", "proc", 0, NULL);
-
-    char *argv[] = { "/bin/sh", "-c", config->command, NULL };
-    execvp(argv[0], argv);
-
     
-    perror("exec failed");
+    if (chdir("/") < 0) {
+        perror("chdir failed");
+        exit(1);
+    }
+    
+    if (mount("proc", "/proc", "proc", 0, NULL) < 0) {
+        perror("mount proc failed");
+    }
+    
+    // Apply nice value
+    if (config->nice_value != 0) {
+        nice(config->nice_value);
+    }
+    
+    // SIMPLE FIX: Execute with /bin/sh -c directly
+    // This preserves quotes and special characters
+    char *sh_args[] = { "/bin/sh", "-c", config->command, NULL };
+    
+    fprintf(stderr, "DEBUG: Executing: /bin/sh -c \"%s\"\n", config->command);
+    execvp(sh_args[0], sh_args);
+    
+    // If that fails, try /bin/busybox
+    char *busybox_args[] = { "/bin/busybox", "sh", "-c", config->command, NULL };
+    execvp(busybox_args[0], busybox_args);
+    
+    perror("All exec attempts failed");
     exit(1);
-
-    return 1;
 }
 
 int register_with_monitor(int monitor_fd,
@@ -507,7 +532,7 @@ void handle_start_request(supervisor_ctx_t *ctx, control_request_t *req, control
     // Perform clone with namespace flags
     // SIGCHLD is required so we can reap the child via waitpid
     pid_t child_pid = clone(child_fn, stack + STACK_SIZE, 
-                            CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET | SIGCHLD, 
+                            CLONE_NEWPID | CLONE_NEWUTS | CLONE_NEWNS | SIGCHLD, 
                             config);
 
     if (child_pid < 0) {
@@ -524,16 +549,21 @@ void handle_start_request(supervisor_ctx_t *ctx, control_request_t *req, control
     close(pipe_fds[1]); // Close write end in supervisor
 
     // 1. Update Metadata List
+    // 1. Update Metadata List
     pthread_mutex_lock(&ctx->metadata_lock);
     container_record_t *new_rec = malloc(sizeof(container_record_t));
     memset(new_rec, 0, sizeof(container_record_t));
-    
+
     strncpy(new_rec->id, req->container_id, CONTAINER_ID_LEN - 1);
     new_rec->host_pid = child_pid;
     new_rec->started_at = time(NULL);
     new_rec->state = CONTAINER_RUNNING;
     snprintf(new_rec->log_path, PATH_MAX, "%s/%s.log", LOG_DIR, req->container_id);
-    
+
+    // ADD THESE LINES:
+    new_rec->soft_limit_bytes = req->soft_limit_bytes;
+    new_rec->hard_limit_bytes = req->hard_limit_bytes;
+
     new_rec->next = ctx->containers;
     ctx->containers = new_rec;
     pthread_mutex_unlock(&ctx->metadata_lock);
@@ -571,24 +601,36 @@ void handle_start_request(supervisor_ctx_t *ctx, control_request_t *req, control
 static void reap_zombies(supervisor_ctx_t *ctx) {
     int status;
     pid_t pid;
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        pthread_mutex_lock(&ctx->metadata_lock);
-        container_record_t *curr = ctx->containers;
-        while (curr) {
-            if (curr->host_pid == pid) {
-                if (WIFEXITED(status)) {
-                    curr->state = CONTAINER_EXITED;
-                    curr->exit_code = WEXITSTATUS(status);
-                } else if (WIFSIGNALED(status)) {
-                    curr->state = CONTAINER_KILLED;
-                    curr->exit_signal = WTERMSIG(status);
-                }
-                unregister_from_monitor(ctx->monitor_fd, curr->id, pid);
-                break;
+    
+    pthread_mutex_lock(&ctx->metadata_lock);
+    container_record_t *curr = ctx->containers;
+    container_record_t *prev = NULL;
+    
+    while (curr) {
+        // Check if process is dead
+        if (kill(curr->host_pid, 0) != 0 && errno == ESRCH) {
+            printf("DEBUG: Cleaning up dead process %d\n", curr->host_pid);
+            
+            // Remove from linked list
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                ctx->containers = curr->next;
             }
+            
+            container_record_t *to_free = curr;
             curr = curr->next;
+            free(to_free);
+            continue;
         }
-        pthread_mutex_unlock(&ctx->metadata_lock);
+        prev = curr;
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&ctx->metadata_lock);
+    
+    // Also do normal waitpid
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        printf("DEBUG: waitpid reaped PID %d\n", pid);
     }
 }
 
@@ -614,6 +656,12 @@ static int run_supervisor(const char *rootfs)
         perror("bounded_buffer_init");
         pthread_mutex_destroy(&ctx.metadata_lock);
         return 1;
+    }
+
+    if (mkdir(LOG_DIR, 0755) != 0 && errno != EEXIST) {
+        perror("Failed to create log directory");
+        // Don't exit - maybe log to stderr instead
+        fprintf(stderr, "Warning: Could not create %s directory\n", LOG_DIR);
     }
 
     ctx.monitor_fd = open("/dev/container_monitor", O_RDWR);
@@ -647,39 +695,144 @@ static int run_supervisor(const char *rootfs)
         read(client_fd, &req, sizeof(req));
         control_response_t resp = {0, "Success"};
 
-        if (req.kind == CMD_START || req.kind == CMD_RUN) {
+        if (req.kind == CMD_START ) {
             
             handle_start_request(&ctx, &req, &resp);
         } 
-        else if (req.kind == CMD_PS) {
+        else if (req.kind == CMD_RUN) {
+            // Start container
+            handle_start_request(&ctx, &req, &resp);
             
-            pthread_mutex_lock(&ctx.metadata_lock);
-            container_record_t *curr = ctx.containers;
-            int offset = 0;
-            offset += snprintf(resp.message, sizeof(resp.message), "ID\tPID\tSTATE\n");
-            while (curr && offset < (int)sizeof(resp.message)) {
-                offset += snprintf(resp.message + offset, sizeof(resp.message) - offset,
-                                  "%s\t%d\t%s\n", curr->id, curr->host_pid, state_to_string(curr->state));
-                curr = curr->next;
+            // If start succeeded, wait for it to exit
+            if (resp.status == 0) {
+                pid_t container_pid = 0;
+                char *pid_str = strstr(resp.message, "PID ");
+                if (pid_str) {
+                    container_pid = atoi(pid_str + 4);
+                }
+                
+                if (container_pid > 0) {
+                    int status;
+                    waitpid(container_pid, &status, 0);
+                    
+                    if (WIFEXITED(status)) {
+                        snprintf(resp.message, CONTROL_MESSAGE_LEN, 
+                                "Container exited with code %d", WEXITSTATUS(status));
+                        resp.status = WEXITSTATUS(status);
+                    } else if (WIFSIGNALED(status)) {
+                        snprintf(resp.message, CONTROL_MESSAGE_LEN, 
+                                "Container killed by signal %d", WTERMSIG(status));
+                        resp.status = 128 + WTERMSIG(status);
+                    }
+                }
             }
-            if (ctx.containers == NULL) {
-                strncpy(resp.message, "No active containers.\n", CONTROL_MESSAGE_LEN);
+        }
+        else if (req.kind == CMD_LOGS) {
+            char log_path[PATH_MAX];
+            snprintf(log_path, PATH_MAX, "%s/%s.log", LOG_DIR, req.container_id);
+            
+            FILE *fp = fopen(log_path, "r");
+            if (fp == NULL) {
+                resp.status = -1;
+                snprintf(resp.message, CONTROL_MESSAGE_LEN, "No logs for container %s", req.container_id);
+            } else {
+                char buffer[4096];
+                size_t bytes;
+                resp.message[0] = '\0';
+                while (fgets(buffer, sizeof(buffer), fp)) {
+                    strncat(resp.message, buffer, CONTROL_MESSAGE_LEN - strlen(resp.message) - 1);
+                }
+                fclose(fp);
+                resp.status = 0;
             }
-            pthread_mutex_unlock(&ctx.metadata_lock);
-        } 
-        else if (req.kind == CMD_STOP) {
+        }
+        else if (req.kind == CMD_PS) {
             pthread_mutex_lock(&ctx.metadata_lock);
+            
+            // FIRST PASS: Check if running processes are still alive
             container_record_t *curr = ctx.containers;
-            int found = 0;
             while (curr) {
-                if (strcmp(curr->id, req.container_id) == 0) {
-                    kill(curr->host_pid, SIGTERM);
-                    found = 1;
-                    break;
+                if (curr->state == CONTAINER_RUNNING) {
+                    // Check if process exists (kill with signal 0 doesn't kill, just checks)
+                    if (kill(curr->host_pid, 0) != 0 && errno == ESRCH) {
+                        // Process is dead but wasn't reaped properly
+                        curr->state = CONTAINER_KILLED;
+                        curr->exit_signal = 9;  // SIGKILL from monitor
+                        printf("DEBUG: Process %d is dead, marking as killed\n", curr->host_pid);
+                    }
                 }
                 curr = curr->next;
             }
-            if (!found) { resp.status = -1; strcpy(resp.message, "Not found"); }
+            
+            // SECOND PASS: Build output table
+            curr = ctx.containers;
+            int offset = 0;
+            offset += snprintf(resp.message, sizeof(resp.message), 
+                "ID\tPID\tSTATE\tSTARTED\t\tSOFT\tHARD\tEXIT\n");
+
+            while (curr && offset < (int)sizeof(resp.message)) {
+                char start_time[64];
+                struct tm *tm_info = localtime(&curr->started_at);
+                strftime(start_time, sizeof(start_time), "%H:%M:%S", tm_info);
+                
+                int exit_display = 0;
+                if (curr->state == CONTAINER_EXITED) exit_display = curr->exit_code;
+                else if (curr->state == CONTAINER_KILLED) exit_display = curr->exit_signal;
+                
+                offset += snprintf(resp.message + offset, sizeof(resp.message) - offset,
+                                "%s\t%d\t%s\t%s\t%luM\t%luM\t%d\n",
+                                curr->id, curr->host_pid, state_to_string(curr->state),
+                                start_time,
+                                curr->soft_limit_bytes / (1024*1024),
+                                curr->hard_limit_bytes / (1024*1024),
+                                exit_display);
+                curr = curr->next;
+            }
+            
+            if (ctx.containers == NULL) {
+                strncpy(resp.message, "No containers.\n", CONTROL_MESSAGE_LEN);
+            }
+            pthread_mutex_unlock(&ctx.metadata_lock);
+        }
+        else if (req.kind == CMD_STOP) {
+            pthread_mutex_lock(&ctx.metadata_lock);
+            container_record_t *curr = ctx.containers;
+            container_record_t *prev = NULL;
+            int found = 0;
+            
+            while (curr) {
+                if (strcmp(curr->id, req.container_id) == 0) {
+                    found = 1;
+                    
+                    // Kill the process
+                    if (kill(curr->host_pid, SIGKILL) == 0) {
+                        curr->state = CONTAINER_STOPPED;
+                        snprintf(resp.message, CONTROL_MESSAGE_LEN, 
+                                "Container %s stopped", req.container_id);
+                        
+                        // Remove from list immediately
+                        if (prev) {
+                            prev->next = curr->next;
+                        } else {
+                            ctx.containers = curr->next;
+                        }
+                        free(curr);
+                    } else {
+                        resp.status = -1;
+                        //snprintf(resp.message, CONTROL_MESSAGE_LEN, 
+                               // "Failed to stop container %s", req.container_id);
+                    }
+                    break;
+                }
+                prev = curr;
+                curr = curr->next;
+            }
+            
+            if (!found) {
+                resp.status = -1;
+                snprintf(resp.message, CONTROL_MESSAGE_LEN, 
+                        "Container %s not found", req.container_id);
+            }
             pthread_mutex_unlock(&ctx.metadata_lock);
         }
 
