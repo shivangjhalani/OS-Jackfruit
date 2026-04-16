@@ -4,8 +4,8 @@
 
 | Name | SRN |
 |------|-----|
-| Mahathi S | PES2UG24AM084 |
-| Leka N | PES2UG24AM082 |
+| Lakshmi Pranathi | PES2UG24CS249 |
+| Naija Hodigere | PES2UG24CS296 |
 
 ---
 
