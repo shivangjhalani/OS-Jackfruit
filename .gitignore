@@ -32,3 +32,5 @@ logs/
 *.swp
 *~
 .vscode/
+
+.DS_Store
