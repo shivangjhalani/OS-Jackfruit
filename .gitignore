@@ -35,3 +35,11 @@ logs/
 *.swp
 *~
 .vscode/
+
+# Local backups
+boilerplate/engine.c.bak
+
+# Container root filesystems (do not commit)
+boilerplate/rootfs-base/
+boilerplate/rootfs-*/
+boilerplate/alpine-minirootfs*.tar.gz

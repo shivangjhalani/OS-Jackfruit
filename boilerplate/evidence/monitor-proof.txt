@@ -1,0 +1,24 @@
+[61762.894471] [container_monitor] Module loaded. Device: /dev/container_monitor
+[61974.289767] [container_monitor] Registering container=beta pid=17813 soft=41943040 hard=67108864
+[62208.401139] [container_monitor] Unregister request container=beta pid=17813
+[62513.982405] [container_monitor] Registering container=gamma pid=18164 soft=41943040 hard=67108864
+[75405.735584] [container_monitor] Module unloaded.
+[75405.763957] [container_monitor] Module loaded. Device: /dev/container_monitor
+[75642.832071] [container_monitor] Registering container=c1 pid=28425 soft=20971520 hard=31457280
+[75648.430710] [container_monitor] Unregister request container=c1 pid=28425
+[75708.884538] [container_monitor] Registering container=c2 pid=28470 soft=8388608 hard=12582912
+[75730.494685] [container_monitor] Unregister request container=c2 pid=28470
+[76186.284050] [container_monitor] Registering container=c3 pid=28605 soft=8388608 hard=12582912
+[76186.671828] [container_monitor] SOFT LIMIT container=c3 pid=28605 rss=8388608 limit=9043968
+[76187.681558] [container_monitor] HARD LIMIT container=c3 pid=28605 rss=12582912 limit=17432576
+[76199.339313] [container_monitor] Unregister request container=c3 pid=28605
+[77091.116244] [container_monitor] Registering container=c4 pid=29034 soft=20971520 hard=31457280
+[77094.100000] [container_monitor] SOFT LIMIT container=c4 pid=29034 rss=20971520 limit=25690112
+[77095.102996] [container_monitor] HARD LIMIT container=c4 pid=29034 rss=31457280 limit=34078720
+[77102.399215] [container_monitor] Unregister request container=c4 pid=29034
+[80429.512044] [container_monitor] Module unloaded.
+[80433.892970] [container_monitor] Module loaded. Device: /dev/container_monitor
+[80528.394239] [container_monitor] Registering container=c5 pid=33399 soft=20971520 hard=31457280
+[80531.397206] [container_monitor] SOFT LIMIT container=c5 pid=33399 rss=25821184 limit=20971520
+[80532.433388] [container_monitor] HARD LIMIT container=c5 pid=33399 rss=34209792 limit=31457280
+[80865.964012] [container_monitor] Unregister request container=c5 pid=33399
