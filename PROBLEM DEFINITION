@@ -1,0 +1,27 @@
+Task 6 – Resource Cleanup
+The problem in Task 6 is to ensure that the container runtime and kernel memory monitor can shut down completely and safely, without leaving any residual resources or inconsistent state. After all containers have been started, monitored, and stopped in previous tasks, the system must:
+- Reap all child processes in the supervisor so that no zombie (`Z`) processes remain.  
+- Terminate logging threads cleanly, after flushing any remaining log data from the bounded buffer to disk.  
+- Release all user-space resources, including pipes, control sockets, log file descriptors, and dynamically allocated heap structures used for container metadata and logging.  
+-Clean up kernel-space state in the memory monitor module by removing all entries from its monitored-process list and freeing associated memory before `rmmod`.  
+Formally, Task 6 asks you to verify and demonstrate that, after a full demo run and shutdown sequence, there are no zombie processes, no lingering threads, no open control sockets or stale FDs, and no leftover kernel monitoring entries.
+
+					
+						METHODOLOGY
+
+---
+
+Task 6 — Methodology 
+To validate teardown, run your full demo sequence (start supervisor, start containers, generate workload/log activity, stop containers, shutdown supervisor) and then collect evidence using targeted checks:
+
+1. User-space cleanup verification
+   - Confirm containers have terminated and the supervisor has reaped them: check for `Z` states using `ps` (zombie check).
+   - Confirm logger shutdown: after stopping the supervisor, ensure logging does not hang and that log files contain only complete buffered output (bounded buffer drained).
+   - Confirm file descriptor / IPC cleanup indirectly: ensure the control socket does not linger after shutdown and that no workload containers/processes remain.
+
+2. Kernel-space cleanup verification
+   - Unload the kernel module (`rmmod monitor`) after shutdown.
+   - Confirm module unload succeeded and check kernel logs (`dmesg`) for teardown messages.
+   - Validate that monitored entries do not remain by ensuring unload cleanup completes without errors and that future runs do not show stale monitoring effects.
+
+This methodology produces concrete evidence for the required Task 6 outcomes: reaping correctness, logger thread termination, no zombies/stale metadata, and kernel list cleanup on module unload.
