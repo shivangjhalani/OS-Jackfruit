@@ -48,6 +48,8 @@
 #define DEFAULT_SOFT_LIMIT (40UL << 20)
 #define DEFAULT_HARD_LIMIT (64UL << 20)
 
+
+
 typedef enum {
     CMD_SUPERVISOR = 0,
     CMD_START,
@@ -127,7 +129,7 @@ typedef struct {
     pthread_mutex_t metadata_lock;
     container_record_t *containers;
 } supervisor_ctx_t;
-
+container_record_t *container_list = NULL;
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -387,46 +389,183 @@ int unregister_from_monitor(int monitor_fd, const char *container_id, pid_t host
  *   - accept control requests and update container state
  *   - reap children and respond to signals
  */
+
 static int run_supervisor(const char *rootfs)
 {
-    supervisor_ctx_t ctx;
-    int rc;
+    int server_fd;
 
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.server_fd = -1;
-    ctx.monitor_fd = -1;
+    unlink(CONTROL_PATH);
 
-    rc = pthread_mutex_init(&ctx.metadata_lock, NULL);
-    if (rc != 0) {
-        errno = rc;
-        perror("pthread_mutex_init");
+    server_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket");
         return 1;
     }
 
-    rc = bounded_buffer_init(&ctx.log_buffer);
-    if (rc != 0) {
-        errno = rc;
-        perror("bounded_buffer_init");
-        pthread_mutex_destroy(&ctx.metadata_lock);
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+
+    if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind");
         return 1;
     }
 
-    /*
-     * TODO:
-     *   1) open /dev/container_monitor
-     *   2) create the control socket / FIFO / shared-memory channel
-     *   3) install SIGCHLD / SIGINT / SIGTERM handling
-     *   4) spawn the logger thread
-     *   5) enter the supervisor event loop
-     */
-    fprintf(stderr, "Supervisor mode not implemented yet for base-rootfs: %s\n", rootfs);
+    if (listen(server_fd, 5) < 0) {
+        perror("listen");
+        return 1;
+    }
 
-    bounded_buffer_begin_shutdown(&ctx.log_buffer);
-    bounded_buffer_destroy(&ctx.log_buffer);
-    pthread_mutex_destroy(&ctx.metadata_lock);
-    return 1;
+    printf("Supervisor running...\n");
+
+    while (1) {
+
+        // ✅ reap children
+        int status;
+        pid_t p;
+
+        while ((p = waitpid(-1, &status, WNOHANG)) > 0) {
+            container_record_t *curr = container_list;
+
+            while (curr) {
+                if (curr->host_pid == p) {
+                    curr->state = CONTAINER_EXITED;
+                    printf("[SUPERVISOR] Container %s exited\n", curr->id);
+                    break;
+                }
+                curr = curr->next;
+            }
+        }
+
+        int client = accept(server_fd, NULL, NULL);
+        if (client < 0) {
+            perror("accept");
+            continue;
+        }
+
+        char buffer[CONTROL_MESSAGE_LEN];
+        int n = read(client, buffer, sizeof(buffer) - 1);
+
+        if (n > 0) {
+            buffer[n] = '\0';
+            printf("[SUPERVISOR] Received: %s\n", buffer);
+
+            int cmd;
+            char id[64], rootfs[256], command[256];
+
+            id[0] = rootfs[0] = command[0] = '\0';
+
+            sscanf(buffer, "%d %s %s %s", &cmd, id, rootfs, command);
+
+            // START
+            if (cmd == CMD_START) {
+                printf("[SUPERVISOR] Starting container %s\n", id);
+
+                int pipefd[2];
+pipe(pipefd);
+
+pid_t pid = fork();
+
+if (pid == 0) {
+    // CHILD
+
+    close(pipefd[0]); // close read end
+
+    dup2(pipefd[1], STDOUT_FILENO);
+    dup2(pipefd[1], STDERR_FILENO);
+    close(pipefd[1]);
+
+    chroot(rootfs);
+    chdir("/");
+
+    mount("proc", "/proc", "proc", 0, NULL);
+
+    char *args[] = {command, NULL};
+    execvp(command, args);
+
+    perror("exec");
+    exit(1);
 }
 
+// PARENT
+close(pipefd[1]);
+
+                printf("[SUPERVISOR] Started PID %d\n", pid);
+                mkdir(LOG_DIR, 0777);
+
+char log_path[256];
+snprintf(log_path, sizeof(log_path), "%s/%s.log", LOG_DIR, id);
+
+FILE *logf = fopen(log_path, "w");
+if (!logf) {
+    perror("log file");
+}
+
+char buf[1024];
+int nbytes;
+
+while ((nbytes = read(pipefd[0], buf, sizeof(buf)-1)) > 0) {
+    buf[nbytes] = '\0';
+
+    printf("[LOG %s]: %s", id, buf);
+
+    if (logf) {
+        fprintf(logf, "%s", buf);
+        fflush(logf);
+    }
+}
+
+if (logf) fclose(logf);
+close(pipefd[0]);
+
+                container_record_t *c = malloc(sizeof(container_record_t));
+                memset(c, 0, sizeof(*c));
+
+                strncpy(c->id, id, CONTAINER_ID_LEN - 1);
+                c->host_pid = pid;
+                c->state = CONTAINER_RUNNING;
+
+                c->next = container_list;
+                container_list = c;
+            }
+
+            // PS
+            else if (cmd == CMD_PS) {
+                container_record_t *curr = container_list;
+
+                while (curr) {
+                    printf("ID=%s PID=%d STATE=%s\n",
+                           curr->id,
+                           curr->host_pid,
+                           state_to_string(curr->state));
+                    curr = curr->next;
+                }
+            }
+
+            // STOP
+            else if (cmd == CMD_STOP) {
+                container_record_t *curr = container_list;
+
+                while (curr) {
+                    if (strcmp(curr->id, id) == 0) {
+                        kill(curr->host_pid, SIGKILL);
+                        curr->state = CONTAINER_KILLED;
+
+                        printf("[SUPERVISOR] Killed %s\n", id);
+                        break;
+                    }
+                    curr = curr->next;
+                }
+            }
+        }
+
+        write(client, "OK\n", 3);
+        close(client);
+    }
+
+    return 0;
+}
 /*
  * TODO:
  * Implement the client-side control request path.
@@ -437,11 +576,43 @@ static int run_supervisor(const char *rootfs)
  */
 static int send_control_request(const control_request_t *req)
 {
-    (void)req;
-    fprintf(stderr, "Control-plane client path not implemented.\n");
-    return 1;
-}
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        perror("socket");
+        return 1;
+    }
 
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, CONTROL_PATH, sizeof(addr.sun_path) - 1);
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("connect");
+        close(sock);
+        return 1;
+    }
+
+    char msg[CONTROL_MESSAGE_LEN];
+
+    snprintf(msg, sizeof(msg), "%d %s %s %s",
+             req->kind,
+             req->container_id,
+             req->rootfs,
+             req->command);
+
+    write(sock, msg, strlen(msg));
+
+    char buffer[256];
+    int n = read(sock, buffer, sizeof(buffer) - 1);
+    if (n > 0) {
+        buffer[n] = '\0';
+        printf("%s", buffer);
+    }
+
+    close(sock);
+    return 0;
+}
 static int cmd_start(int argc, char *argv[])
 {
     control_request_t req;

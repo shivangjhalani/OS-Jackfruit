@@ -33,7 +33,7 @@ int main(int argc, char *argv[])
     time_t last_report = start;
     volatile unsigned long long accumulator = 0;
 
-    while ((unsigned int)(time(NULL) - start) < duration) {
+    while (1) {
         accumulator = accumulator * 1664525ULL + 1013904223ULL;
 
         if (time(NULL) != last_report) {
